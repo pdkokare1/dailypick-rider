@@ -106,5 +106,67 @@
 
         connectWS();
     </script>
+
+    <script>
+        // 1. Intercept the WebSocket connection to alert the rider when mathematically dispatched
+        const originalConnectWSPhase10 = connectWS;
+        connectWS = function() {
+            originalConnectWSPhase10();
+            setTimeout(() => {
+                if (ws) {
+                    ws.addEventListener('message', (event) => {
+                        try {
+                            const data = JSON.parse(event.data);
+                            if (data.type === 'RIDER_DISPATCHED') {
+                                alert(`🚨 NEW ORDER AUTO-ASSIGNED!\nOrder ID: ${data.orderId}\nHead to the store immediately.`);
+                                document.getElementById('order-id-input').value = data.orderId;
+                                startDelivery();
+                            }
+                        } catch(e) {}
+                    });
+                }
+            }, 500);
+        };
+
+        // If WS is already connected, bind immediately
+        if (ws) {
+            ws.addEventListener('message', (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'RIDER_DISPATCHED') {
+                        alert(`🚨 NEW ORDER AUTO-ASSIGNED!\nOrder ID: ${data.orderId}\nHead to the store immediately.`);
+                        document.getElementById('order-id-input').value = data.orderId;
+                        startDelivery();
+                    }
+                } catch(e) {}
+            });
+        }
+
+        // 2. Wrap Geolocation to constantly update MongoDB $geoNear matrices 
+        const REST_URL = 'https://dailypick-backend-production-05d6.up.railway.app/api/orders/rider/location';
+        let lastSync = 0;
+
+        const originalWatchPositionPhase10 = navigator.geolocation.watchPosition;
+        navigator.geolocation.watchPosition = function(success, error, options) {
+            const wrappedSuccess = function(position) {
+                success(position); // Process normal WS payload first
+                
+                const now = Date.now();
+                if (now - lastSync > 5000 && activeOrderId) { // Push to REST every 5 seconds for backend routing map
+                    lastSync = now;
+                    fetch(REST_URL, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            riderId: 'RIDER_' + activeOrderId.substring(0,5), 
+                            lat: position.coords.latitude,
+                            lng: position.coords.longitude
+                        })
+                    }).catch(() => {});
+                }
+            };
+            return originalWatchPositionPhase10.call(navigator.geolocation, wrappedSuccess, error, options);
+        };
+    </script>
 </body>
 </html>
