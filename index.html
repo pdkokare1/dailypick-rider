@@ -118,6 +118,13 @@
                         try {
                             const data = JSON.parse(event.data);
                             if (data.type === 'RIDER_DISPATCHED') {
+                                // --- NEW: PHASE 16 HYBRID DISPATCH GUARDRAIL ---
+                                // Silently ignore Enterprise store orders. Croma's internal fleet handles these.
+                                if (data.fulfillmentType === 'STORE_DELIVERY' || data.fulfillmentType === 'PARTNER_FLEET') {
+                                    console.log('[HYBRID DISPATCH] Ignored Enterprise Order:', data.orderId);
+                                    return;
+                                }
+                                
                                 alert(`🚨 NEW ORDER AUTO-ASSIGNED!\nOrder ID: ${data.orderId}\nHead to the store immediately.`);
                                 document.getElementById('order-id-input').value = data.orderId;
                                 startDelivery();
@@ -133,6 +140,11 @@
                 try {
                     const data = JSON.parse(event.data);
                     if (data.type === 'RIDER_DISPATCHED') {
+                        // --- NEW: PHASE 16 HYBRID DISPATCH GUARDRAIL ---
+                        if (data.fulfillmentType === 'STORE_DELIVERY' || data.fulfillmentType === 'PARTNER_FLEET') {
+                            return;
+                        }
+
                         alert(`🚨 NEW ORDER AUTO-ASSIGNED!\nOrder ID: ${data.orderId}\nHead to the store immediately.`);
                         document.getElementById('order-id-input').value = data.orderId;
                         startDelivery();
@@ -174,9 +186,17 @@
                 console.log("[NATIVE BRIDGE] Native Environment Detected. Hooking hardware APIs...");
                 
                 try {
-                    const { BackgroundGeolocation } = window.Capacitor.Plugins;
-                    const { PushNotifications } = window.Capacitor.Plugins;
-                    const { KeepAwake } = window.Capacitor.Plugins;
+                    const { BackgroundGeolocation, PushNotifications, KeepAwake, BackgroundRunner } = window.Capacitor.Plugins;
+
+                    // 0. NEW: Hardware Background Runner - Keep thread alive in pocket
+                    if (BackgroundRunner) {
+                        try {
+                            await BackgroundRunner.requestPermissions();
+                            console.log("[NATIVE BRIDGE] Background Runner permissions granted.");
+                        } catch (e) {
+                            console.log("BackgroundRunner config pending.");
+                        }
+                    }
 
                     // 1. Hardware Keep-Awake: Prevent screen from sleeping while mounted on bike
                     if (KeepAwake) await KeepAwake.keepAwake();
