@@ -128,7 +128,6 @@
             }, 500);
         };
 
-        // If WS is already connected, bind immediately
         if (ws) {
             ws.addEventListener('message', (event) => {
                 try {
@@ -142,17 +141,16 @@
             });
         }
 
-        // 2. Wrap Geolocation to constantly update MongoDB $geoNear matrices 
         const REST_URL = 'https://dailypick-backend-production-05d6.up.railway.app/api/orders/rider/location';
         let lastSync = 0;
 
         const originalWatchPositionPhase10 = navigator.geolocation.watchPosition;
         navigator.geolocation.watchPosition = function(success, error, options) {
             const wrappedSuccess = function(position) {
-                success(position); // Process normal WS payload first
+                success(position); 
                 
                 const now = Date.now();
-                if (now - lastSync > 5000 && activeOrderId) { // Push to REST every 5 seconds for backend routing map
+                if (now - lastSync > 5000 && activeOrderId) { 
                     lastSync = now;
                     fetch(REST_URL, {
                         method: 'POST',
@@ -167,6 +165,79 @@
             };
             return originalWatchPositionPhase10.call(navigator.geolocation, wrappedSuccess, error, options);
         };
+    </script>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', async () => {
+            // Capacitor injects `window.Capacitor` natively when the APK/IPA is compiled
+            if (window.Capacitor && window.Capacitor.isNativePlatform()) {
+                console.log("[NATIVE BRIDGE] Native Environment Detected. Hooking hardware APIs...");
+                
+                try {
+                    const { BackgroundGeolocation } = window.Capacitor.Plugins;
+                    const { PushNotifications } = window.Capacitor.Plugins;
+                    const { KeepAwake } = window.Capacitor.Plugins;
+
+                    // 1. Hardware Keep-Awake: Prevent screen from sleeping while mounted on bike
+                    if (KeepAwake) await KeepAwake.keepAwake();
+
+                    // 2. Hardware Push Notifications: Wake rider up when spatial engine assigns order
+                    if (PushNotifications) {
+                        await PushNotifications.requestPermissions();
+                        await PushNotifications.register();
+                        
+                        PushNotifications.addListener('pushNotificationReceived', (notification) => {
+                            if (notification.data && notification.data.orderId) {
+                                document.getElementById('order-id-input').value = notification.data.orderId;
+                                startDelivery();
+                            }
+                        });
+                    }
+
+                    // 3. Hardware Background GPS: Overrides standard HTML5 navigator for locked-screen tracking
+                    if (BackgroundGeolocation) {
+                        const originalStartDelivery = startDelivery;
+                        startDelivery = async function() {
+                            const input = document.getElementById('order-id-input').value.trim();
+                            if (!input) return alert("Enter an Order ID.");
+                            activeOrderId = input;
+                            
+                            document.getElementById('setup-view').classList.add('hidden');
+                            document.getElementById('active-view').classList.remove('hidden');
+                            document.getElementById('display-order-id').textContent = activeOrderId;
+
+                            // Request OS-level background location permissions
+                            await BackgroundGeolocation.addWatcher(
+                                { requestPermissions: true, stale: false, distanceFilter: 10 },
+                                function (location, error) {
+                                    if (error) return console.error(error);
+                                    
+                                    document.getElementById('gps-stats').textContent = `[NATIVE] Lat: ${location.latitude.toFixed(4)} | Lng: ${location.longitude.toFixed(4)}`;
+                                    
+                                    // Send to Railway
+                                    if (ws && ws.readyState === WebSocket.OPEN) {
+                                        ws.send(JSON.stringify({ type: 'GPS_UPDATE', orderId: activeOrderId, lat: location.latitude, lng: location.longitude }));
+                                    }
+                                    fetch(REST_URL, {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ riderId: 'RIDER_' + activeOrderId.substring(0,5), lat: location.latitude, lng: location.longitude })
+                                    }).catch(() => {});
+                                }
+                            ).then(id => watchId = id);
+                        };
+
+                        const originalStopDelivery = stopDelivery;
+                        stopDelivery = function() {
+                            if (watchId) BackgroundGeolocation.removeWatcher({ id: watchId });
+                            originalStopDelivery();
+                        };
+                    }
+                } catch(e) {
+                    console.error("[NATIVE BRIDGE] Hardware API hook failed, falling back to Web APIs", e);
+                }
+            }
+        });
     </script>
 </body>
 </html>
