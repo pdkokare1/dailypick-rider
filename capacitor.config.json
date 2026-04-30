@@ -1,0 +1,21 @@
+{
+  "appId": "com.dailypick.fleet",
+  "appName": "DailyPick Rider",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "plugins": {
+    "BackgroundGeolocation": {
+      "distanceFilter": 10,
+      "desiredAccuracy": "HIGH",
+      "stationaryRadius": 20,
+      "startForeground": true,
+      "debug": false
+    },
+    "PushNotifications": {
+      "presentationOptions": ["badge", "sound", "alert"]
+    },
+    "KeepAwake": {
+      "require": true
+    }
+  }
+}
