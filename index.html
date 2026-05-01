@@ -43,6 +43,17 @@
         .ledger-row { display: flex; justify-content: space-between; background: #334155; padding: 16px; border-radius: 8px; margin-bottom: 8px; font-size: 14px; font-weight: bold; }
         
         #login-view { height: 100vh; display: flex; flex-direction: column; justify-content: center; padding: 24px; }
+
+        /* --- NEW: PHASE 31 SECURE IN-APP CHAT UI --- */
+        .chat-container { background: #0f172a; border-radius: 8px; border: 1px solid #334155; display: flex; flex-direction: column; height: 300px; margin-bottom: 16px; overflow: hidden; }
+        .chat-messages { flex: 1; padding: 12px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+        .chat-bubble { padding: 8px 12px; border-radius: 16px; font-size: 14px; max-width: 80%; }
+        .chat-bubble.rider { background: #3b82f6; align-self: flex-end; color: white; border-bottom-right-radius: 4px; }
+        .chat-bubble.customer { background: #334155; align-self: flex-start; color: white; border-bottom-left-radius: 4px; }
+        .chat-bubble.system { background: transparent; align-self: center; color: #94a3b8; font-size: 11px; font-style: italic; }
+        .chat-input-area { display: flex; padding: 8px; background: #1e293b; border-top: 1px solid #334155; }
+        .chat-input-area input { margin: 0; border-radius: 20px; border-top-right-radius: 0; border-bottom-right-radius: 0; border-right: none; }
+        .chat-input-area button { margin: 0; width: auto; padding: 12px 20px; border-radius: 20px; border-top-left-radius: 0; border-bottom-left-radius: 0; }
     </style>
 </head>
 <body>
@@ -85,6 +96,12 @@
                 <input type="text" id="order-id-input" placeholder="e.g., OMNI-12345 or 60d5f...">
                 <button class="btn-primary" onclick="startDelivery()">Start Live Tracking</button>
             </div>
+
+            <!-- PREDICTIVE HEATMAP ALERT ZONE -->
+            <div id="heatmap-alert" class="card hidden" style="border: 1px solid #ef4444; background: rgba(239, 68, 68, 0.1);">
+                <h4 style="margin: 0 0 8px 0; color: #ef4444;">🔥 High Demand Predicted</h4>
+                <p style="margin: 0; font-size: 12px; color: #cbd5e1;">Heatmap active. Check Mission map for high-demand idle zones.</p>
+            </div>
         </div>
 
         <!-- TAB 2: ACTIVE MISSION -->
@@ -102,9 +119,20 @@
                 <!-- NEW: LEAFLET MAP INJECTION POINT -->
                 <div id="rider-map"></div>
 
-                <div style="display: flex; gap: 12px; margin-bottom: 24px;">
-                    <button class="btn-primary" style="background: #334155; color: white;" onclick="alert('Calling Customer...')">📞 Call Customer</button>
+                <div style="display: flex; gap: 12px; margin-bottom: 16px;">
+                    <button class="btn-primary" style="background: #334155; color: white;" onclick="toggleChat()">💬 Chat</button>
                     <button class="btn-primary" style="background: #334155; color: white;" onclick="alert('Opening Google Maps...')">📍 Navigate</button>
+                </div>
+
+                <!-- --- NEW: PHASE 31 IN-APP CHAT UI --- -->
+                <div id="chat-ui" class="chat-container hidden">
+                    <div class="chat-messages" id="chat-messages">
+                        <div class="chat-bubble system">Connecting to secure chat...</div>
+                    </div>
+                    <div class="chat-input-area">
+                        <input type="text" id="chat-input" placeholder="Message customer...">
+                        <button class="btn-primary" onclick="sendChatMessage()">Send</button>
+                    </div>
                 </div>
 
                 <!-- NEW: DELIVERY OTP VERIFICATION -->
@@ -119,6 +147,8 @@
             <div id="no-mission-state" style="margin-top: 40px; color: #64748b;">
                 <span style="font-size: 40px; display: block; margin-bottom: 16px;">🛵</span>
                 <p>No active delivery mission.</p>
+                <!-- HEATMAP FALLBACK FOR IDLE RIDERS -->
+                <div id="idle-map" style="width: 100%; height: 200px; border-radius: 12px; margin-top: 20px; background: #334155; z-index: 1;"></div>
             </div>
         </div>
 
@@ -255,6 +285,16 @@
                                 alert(`🚨 NEW ORDER AUTO-ASSIGNED!\nOrder ID: ${data.orderId}\nHead to the store immediately.`);
                                 document.getElementById('order-id-input').value = data.orderId;
                                 startDelivery();
+                            }
+
+                            // --- NEW: PHASE 31 PREDICTIVE HEATMAP LISTENER ---
+                            if (data.type === 'FLEET_HEATMAP_UPDATED') {
+                                drawHeatmapZones(data.payload);
+                            }
+
+                            // --- NEW: PHASE 31 IN-APP CHAT LISTENER ---
+                            if (data.type === 'ORDER_CHAT_UPDATED' && data.orderId === activeOrderId) {
+                                appendChatMessage(data.chat);
                             }
                         } catch(e) {}
                     });
@@ -398,8 +438,10 @@
     <!-- ============================================================================ -->
     <script>
         let riderMap = null;
+        let idleMap = null;
         let riderMapMarker = null;
         let completedDropsToday = 0;
+        let heatLayers = [];
 
         function startRiderShift() {
             const phone = document.getElementById('rider-phone').value;
@@ -414,6 +456,9 @@
             document.getElementById('app-wrapper').classList.remove('hidden');
             
             connectWS(); // Initialize the WebSocket listener
+            
+            // Init idle map immediately
+            initIdleMap();
         }
 
         function switchRiderTab(tabName) {
@@ -427,6 +472,15 @@
                 // Leaflet needs to recalculate size when unhidden
                 setTimeout(() => riderMap.invalidateSize(), 100);
             }
+            if (tabName === 'mission' && idleMap && !activeOrderId) {
+                 setTimeout(() => idleMap.invalidateSize(), 100);
+            }
+        }
+
+        function initIdleMap() {
+            if (idleMap) return;
+            idleMap = L.map('idle-map').setView([18.6298, 73.7997], 13);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(idleMap);
         }
 
         function initLeafletMap() {
@@ -437,6 +491,29 @@
             
             const icon = L.divIcon({ html: '<div style="font-size: 30px;">🛵</div>', className: '', iconSize: [30, 30], iconAnchor: [15, 15] });
             riderMapMarker = L.marker([18.6298, 73.7997], { icon }).addTo(riderMap);
+        }
+
+        // --- NEW: PHASE 31 HEATMAP VISUALIZER ---
+        function drawHeatmapZones(heatmapData) {
+            document.getElementById('heatmap-alert').classList.remove('hidden');
+            
+            // Clear old zones
+            if(idleMap) {
+                heatLayers.forEach(layer => idleMap.removeLayer(layer));
+            }
+            heatLayers = [];
+
+            if(idleMap && Array.isArray(heatmapData)) {
+                heatmapData.forEach(zone => {
+                    const circle = L.circle([zone.lat, zone.lng], {
+                        color: 'red',
+                        fillColor: '#f03',
+                        fillOpacity: 0.4,
+                        radius: 500 // 500m radius
+                    }).addTo(idleMap);
+                    heatLayers.push(circle);
+                });
+            }
         }
 
         // Intercept startDelivery to switch tabs and init map
@@ -453,24 +530,32 @@
 
         // Intercept completeDelivery to enforce OTP check and update ledger
         const legacyCompleteDeliveryForUI = completeDelivery;
-        completeDelivery = function() {
+        completeDelivery = async function() {
             const otpInput = document.getElementById('delivery-otp').value.trim();
             if (otpInput.length !== 4) {
                 alert("⚠️ Please enter the 4-digit Delivery OTP provided by the customer.");
                 return;
             }
 
-            // In production, this hits your /api/orders/updateStatus endpoint
-            legacyCompleteDeliveryForUI();
+            // --- PHASE 31 SERVER VERIFICATION (MOCK) ---
+            // In production, this hits your /api/orders/:id/status endpoint
+            try {
+                // const res = await fetch(`https://dailypick.railway.app/api/orders/${activeOrderId}/status`, { method: 'PUT', body: JSON.stringify({ status: 'Delivered', otp: otpInput }) });
+                // if (!res.ok) throw new Error("Invalid OTP");
+                
+                legacyCompleteDeliveryForUI();
 
-            // Update Earnings Ledger (Phase 18 Integration)
-            completedDropsToday++;
-            document.getElementById('ledger-drops-count').textContent = completedDropsToday;
-            document.getElementById('ledger-total-rs').textContent = `Rs ${completedDropsToday * 40}`; // 40 Rs per drop
-            document.getElementById('delivery-otp').value = '';
+                // Update Earnings Ledger (Phase 18 Integration)
+                completedDropsToday++;
+                document.getElementById('ledger-drops-count').textContent = completedDropsToday;
+                document.getElementById('ledger-total-rs').textContent = `Rs ${completedDropsToday * 40}`; // 40 Rs per drop
+                document.getElementById('delivery-otp').value = '';
 
-            document.getElementById('no-mission-state').classList.remove('hidden');
-            document.querySelectorAll('.nav-item')[0].click(); // Back to dashboard
+                document.getElementById('no-mission-state').classList.remove('hidden');
+                document.querySelectorAll('.nav-item')[0].click(); // Back to dashboard
+            } catch(e) {
+                alert("Server rejected the OTP. Please verify with the customer.");
+            }
         };
 
         // Intercept the HTML5 Geolocation to update the Leaflet Map marker visually
@@ -486,6 +571,43 @@
             };
             return originalWatchPositionPhase22.call(navigator.geolocation, mapSuccess, error, options);
         };
+
+        // --- NEW: PHASE 31 IN-APP CHAT LOGIC ---
+        function toggleChat() {
+            const chatUI = document.getElementById('chat-ui');
+            chatUI.classList.toggle('hidden');
+            if(!chatUI.classList.contains('hidden')) {
+                const msgs = document.getElementById('chat-messages');
+                msgs.scrollTop = msgs.scrollHeight;
+            }
+        }
+
+        async function sendChatMessage() {
+            const input = document.getElementById('chat-input');
+            const message = input.value.trim();
+            if (!message || !activeOrderId) return;
+
+            input.value = '';
+            
+            // Optimistic UI Update
+            appendChatMessage({ sender: 'Rider', message });
+
+            // Post to Server
+            fetch(`https://dailypick-backend-production-05d6.up.railway.app/api/orders/${activeOrderId}/chat`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer RIDER_TOKEN` },
+                body: JSON.stringify({ sender: 'Rider', message })
+            }).catch(e => console.error("Chat sync failed"));
+        }
+
+        function appendChatMessage(chat) {
+            const msgs = document.getElementById('chat-messages');
+            const bubble = document.createElement('div');
+            bubble.className = `chat-bubble ${chat.sender.toLowerCase()}`;
+            bubble.textContent = chat.message;
+            msgs.appendChild(bubble);
+            msgs.scrollTop = msgs.scrollHeight;
+        }
 
     </script>
 </body>
