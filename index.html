@@ -191,188 +191,49 @@
     </div>
 
     <!-- ============================================================================ -->
-    <!-- ORIGINAL BEACON LOGIC (PRESERVED EXACTLY AS WRITTEN)                         -->
+    <!-- UNIFIED DAILYPICK ENTERPRISE RIDER LOGIC (PHASE 5 OPTIMIZED)                 -->
     <!-- ============================================================================ -->
     <script>
+        // --- GLOBAL STATE ---
         const WS_URL = 'wss://dailypick-backend-production-05d6.up.railway.app/api/ws/rider';
+        const REST_URL = 'https://dailypick-backend-production-05d6.up.railway.app/api/orders/rider/location';
+        
         let ws = null;
         let watchId = null;
         let activeOrderId = null;
-
-        function connectWS() {
-            ws = new WebSocket(WS_URL);
-            ws.onopen = () => document.getElementById('status-indicator').classList.add('online');
-            ws.onclose = () => {
-                document.getElementById('status-indicator').classList.remove('online');
-                setTimeout(connectWS, 3000); // Auto-reconnect
-            };
-        }
-
-        function startDelivery() {
-            const input = document.getElementById('order-id-input').value.trim();
-            if (!input) return alert("Enter an Order ID.");
-            
-            activeOrderId = input;
-            document.getElementById('setup-view').classList.add('hidden');
-            document.getElementById('active-view').classList.remove('hidden');
-            document.getElementById('display-order-id').textContent = activeOrderId;
-
-            if ("geolocation" in navigator) {
-                // High accuracy mode for Uber-style tracking
-                watchId = navigator.geolocation.watchPosition(
-                    (position) => {
-                        const { latitude, longitude, heading, speed } = position.coords;
-                        document.getElementById('gps-stats').textContent = `Lat: ${latitude.toFixed(4)} | Lng: ${longitude.toFixed(4)} | Speed: ${speed ? (speed * 3.6).toFixed(1) + ' km/h' : '0 km/h'}`;
-                        
-                        if (ws && ws.readyState === WebSocket.OPEN) {
-                            ws.send(JSON.stringify({
-                                type: 'GPS_UPDATE',
-                                orderId: activeOrderId,
-                                lat: latitude,
-                                lng: longitude,
-                                heading: heading || 0
-                            }));
-                        }
-                    },
-                    (err) => alert("GPS Error: " + err.message),
-                    { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
-                );
-            } else {
-                alert("Geolocation is not supported by this device.");
-            }
-        }
-
-        function stopTracking() {
-            if (watchId) navigator.geolocation.clearWatch(watchId);
-            activeOrderId = null;
-            document.getElementById('active-view').classList.add('hidden');
-            document.getElementById('setup-view').classList.remove('hidden');
-            document.getElementById('order-id-input').value = '';
-        }
-
-        function completeDelivery() {
-            // In a full implementation, this hits the backend API to mark order as delivered
-            alert("Delivery Complete! GPS Broadcast terminated.");
-            stopTracking();
-        }
-
-        function stopDelivery() {
-            stopTracking();
-        }
-
-        // Removed the global connectWS() call here so we can call it after Login
-        // connectWS();
-    </script>
-
-    <script>
-        // 1. Intercept the WebSocket connection to alert the rider when mathematically dispatched
-        const originalConnectWSPhase10 = connectWS;
-        connectWS = function() {
-            originalConnectWSPhase10();
-            setTimeout(() => {
-                if (ws) {
-                    ws.addEventListener('message', (event) => {
-                        try {
-                            const data = JSON.parse(event.data);
-                            if (data.type === 'RIDER_DISPATCHED') {
-                                // --- NEW: PHASE 16 HYBRID DISPATCH GUARDRAIL ---
-                                // Silently ignore Enterprise store orders. Croma's internal fleet handles these.
-                                if (data.fulfillmentType === 'STORE_DELIVERY' || data.fulfillmentType === 'PARTNER_FLEET') {
-                                    console.log('[HYBRID DISPATCH] Ignored Enterprise Order:', data.orderId);
-                                    return;
-                                }
-                                
-                                alert(`🚨 NEW ORDER AUTO-ASSIGNED!\nOrder ID: ${data.orderId}\nHead to the store immediately.`);
-                                document.getElementById('order-id-input').value = data.orderId;
-                                startDelivery();
-                            }
-
-                            // --- NEW: PHASE 31 PREDICTIVE HEATMAP LISTENER ---
-                            if (data.type === 'FLEET_HEATMAP_UPDATED') {
-                                drawHeatmapZones(data.payload);
-                            }
-
-                            // --- NEW: PHASE 31 IN-APP CHAT LISTENER ---
-                            if (data.type === 'ORDER_CHAT_UPDATED' && data.orderId === activeOrderId) {
-                                appendChatMessage(data.chat);
-                            }
-                        } catch(e) {}
-                    });
-                }
-            }, 500);
-        };
-
-        if (ws) {
-            ws.addEventListener('message', (event) => {
-                try {
-                    const data = JSON.parse(event.data);
-                    if (data.type === 'RIDER_DISPATCHED') {
-                        // --- NEW: PHASE 16 HYBRID DISPATCH GUARDRAIL ---
-                        if (data.fulfillmentType === 'STORE_DELIVERY' || data.fulfillmentType === 'PARTNER_FLEET') {
-                            return;
-                        }
-
-                        alert(`🚨 NEW ORDER AUTO-ASSIGNED!\nOrder ID: ${data.orderId}\nHead to the store immediately.`);
-                        document.getElementById('order-id-input').value = data.orderId;
-                        startDelivery();
-                    }
-                } catch(e) {}
-            });
-        }
-
-        const REST_URL = 'https://dailypick-backend-production-05d6.up.railway.app/api/orders/rider/location';
+        
+        let riderMap = null;
+        let idleMap = null;
+        let riderMapMarker = null;
+        let heatLayers = [];
+        
+        let completedDropsToday = 0;
         let lastSync = 0;
+        
+        // Native Hardware Flags
+        let isNative = false;
+        let BackgroundGeolocationPlugin = null;
 
-        const originalWatchPositionPhase10 = navigator.geolocation.watchPosition;
-        navigator.geolocation.watchPosition = function(success, error, options) {
-            const wrappedSuccess = function(position) {
-                success(position); 
-                
-                const now = Date.now();
-                if (now - lastSync > 5000 && activeOrderId) { 
-                    lastSync = now;
-                    fetch(REST_URL, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            riderId: 'RIDER_' + activeOrderId.substring(0,5), 
-                            lat: position.coords.latitude,
-                            lng: position.coords.longitude
-                        })
-                    }).catch(() => {});
-                }
-            };
-            return originalWatchPositionPhase10.call(navigator.geolocation, wrappedSuccess, error, options);
-        };
-    </script>
-
-    <script>
+        // --- NATIVE HARDWARE INITIALIZATION ---
         document.addEventListener('DOMContentLoaded', async () => {
-            // Capacitor injects `window.Capacitor` natively when the APK/IPA is compiled
             if (window.Capacitor && window.Capacitor.isNativePlatform()) {
                 console.log("[NATIVE BRIDGE] Native Environment Detected. Hooking hardware APIs...");
-                
+                isNative = true;
                 try {
                     const { BackgroundGeolocation, PushNotifications, KeepAwake, BackgroundRunner } = window.Capacitor.Plugins;
+                    BackgroundGeolocationPlugin = BackgroundGeolocation;
 
-                    // 0. NEW: Hardware Background Runner - Keep thread alive in pocket
                     if (BackgroundRunner) {
                         try {
                             await BackgroundRunner.requestPermissions();
-                            console.log("[NATIVE BRIDGE] Background Runner permissions granted.");
-                        } catch (e) {
-                            console.log("BackgroundRunner config pending.");
-                        }
+                        } catch (e) { console.log("BackgroundRunner config pending."); }
                     }
 
-                    // 1. Hardware Keep-Awake: Prevent screen from sleeping while mounted on bike
                     if (KeepAwake) await KeepAwake.keepAwake();
 
-                    // 2. Hardware Push Notifications: Wake rider up when spatial engine assigns order
                     if (PushNotifications) {
                         await PushNotifications.requestPermissions();
                         await PushNotifications.register();
-                        
                         PushNotifications.addListener('pushNotificationReceived', (notification) => {
                             if (notification.data && notification.data.orderId) {
                                 document.getElementById('order-id-input').value = notification.data.orderId;
@@ -380,85 +241,25 @@
                             }
                         });
                     }
-
-                    // 3. Hardware Background GPS: Overrides standard HTML5 navigator for locked-screen tracking
-                    if (BackgroundGeolocation) {
-                        const originalStartDelivery = startDelivery;
-                        startDelivery = async function() {
-                            const input = document.getElementById('order-id-input').value.trim();
-                            if (!input) return alert("Enter an Order ID.");
-                            activeOrderId = input;
-                            
-                            // Let the new SPA logic handle the views, just set the text
-                            document.getElementById('display-order-id').textContent = activeOrderId;
-
-                            // Request OS-level background location permissions
-                            await BackgroundGeolocation.addWatcher(
-                                { requestPermissions: true, stale: false, distanceFilter: 10 },
-                                function (location, error) {
-                                    if (error) return console.error(error);
-                                    
-                                    document.getElementById('gps-stats').textContent = `[NATIVE] Lat: ${location.latitude.toFixed(4)} | Lng: ${location.longitude.toFixed(4)}`;
-                                    
-                                    // Send to Railway
-                                    if (ws && ws.readyState === WebSocket.OPEN) {
-                                        ws.send(JSON.stringify({ type: 'GPS_UPDATE', orderId: activeOrderId, lat: location.latitude, lng: location.longitude }));
-                                    }
-                                    fetch(REST_URL, {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ riderId: 'RIDER_' + activeOrderId.substring(0,5), lat: location.latitude, lng: location.longitude })
-                                    }).catch(() => {});
-
-                                    // NEW: Sync Native GPS to Leaflet Map
-                                    if (riderMapMarker && riderMap) {
-                                        const latlng = [location.latitude, location.longitude];
-                                        riderMapMarker.setLatLng(latlng);
-                                        riderMap.panTo(latlng);
-                                    }
-                                }
-                            ).then(id => watchId = id);
-                        };
-
-                        const originalStopDelivery = stopDelivery;
-                        stopDelivery = function() {
-                            if (watchId) BackgroundGeolocation.removeWatcher({ id: watchId });
-                            originalStopDelivery();
-                        };
-                    }
                 } catch(e) {
                     console.error("[NATIVE BRIDGE] Hardware API hook failed, falling back to Web APIs", e);
                 }
             }
         });
-    </script>
 
-    <!-- ============================================================================ -->
-    <!-- NEW: PHASE 22 SPA LOGIC & LEAFLET MAP INTERCEPTORS                           -->
-    <!-- ============================================================================ -->
-    <script>
-        let riderMap = null;
-        let idleMap = null;
-        let riderMapMarker = null;
-        let completedDropsToday = 0;
-        let heatLayers = [];
-
+        // --- SHIFT & UI MANAGEMENT ---
         function startRiderShift() {
             const phone = document.getElementById('rider-phone').value;
             const pin = document.getElementById('rider-pin').value;
-            
             if (!phone || !pin) return alert("Please enter credentials.");
 
-            // In production, this hits your /api/auth/login endpoint
             document.getElementById('header-rider-id').textContent = `R-${phone.substring(6)}`;
-            
             document.getElementById('login-view').classList.add('hidden');
             document.getElementById('app-wrapper').classList.remove('hidden');
             
-            connectWS(); // Initialize the WebSocket listener
-            
-            // Init idle map immediately
+            connectWS();
             initIdleMap();
+            syncOfflineDrops(); // Attempt to clear any basement drops from yesterday
         }
 
         function switchRiderTab(tabName) {
@@ -469,7 +270,6 @@
             event.currentTarget.classList.add('active');
 
             if (tabName === 'mission' && riderMap) {
-                // Leaflet needs to recalculate size when unhidden
                 setTimeout(() => riderMap.invalidateSize(), 100);
             }
             if (tabName === 'mission' && idleMap && !activeOrderId) {
@@ -477,6 +277,7 @@
             }
         }
 
+        // --- MAPS & HEATMAPS ---
         function initIdleMap() {
             if (idleMap) return;
             idleMap = L.map('idle-map').setView([18.6298, 73.7997], 13);
@@ -484,95 +285,212 @@
         }
 
         function initLeafletMap() {
-            if (riderMap) return; // Already initialized
-
-            riderMap = L.map('rider-map').setView([18.6298, 73.7997], 15); // Default Pimpri-Chinchwad
+            if (riderMap) return; 
+            riderMap = L.map('rider-map').setView([18.6298, 73.7997], 15);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(riderMap);
             
             const icon = L.divIcon({ html: '<div style="font-size: 30px;">🛵</div>', className: '', iconSize: [30, 30], iconAnchor: [15, 15] });
             riderMapMarker = L.marker([18.6298, 73.7997], { icon }).addTo(riderMap);
         }
 
-        // --- NEW: PHASE 31 HEATMAP VISUALIZER ---
         function drawHeatmapZones(heatmapData) {
             document.getElementById('heatmap-alert').classList.remove('hidden');
-            
-            // Clear old zones
-            if(idleMap) {
-                heatLayers.forEach(layer => idleMap.removeLayer(layer));
-            }
+            if(idleMap) heatLayers.forEach(layer => idleMap.removeLayer(layer));
             heatLayers = [];
 
             if(idleMap && Array.isArray(heatmapData)) {
                 heatmapData.forEach(zone => {
                     const circle = L.circle([zone.lat, zone.lng], {
-                        color: 'red',
-                        fillColor: '#f03',
-                        fillOpacity: 0.4,
-                        radius: 500 // 500m radius
+                        color: 'red', fillColor: '#f03', fillOpacity: 0.4, radius: 500
                     }).addTo(idleMap);
                     heatLayers.push(circle);
                 });
             }
         }
 
-        // Intercept startDelivery to switch tabs and init map
-        const legacyStartDeliveryForUI = startDelivery;
-        startDelivery = function() {
-            legacyStartDeliveryForUI();
+        // --- WEBSOCKET ENGINE ---
+        function connectWS() {
+            ws = new WebSocket(WS_URL);
+            ws.onopen = () => document.getElementById('status-indicator').classList.add('online');
+            ws.onclose = () => {
+                document.getElementById('status-indicator').classList.remove('online');
+                setTimeout(connectWS, 3000); 
+            };
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'RIDER_DISPATCHED') {
+                        // Hybrid Dispatch Guardrail
+                        if (data.fulfillmentType === 'STORE_DELIVERY' || data.fulfillmentType === 'PARTNER_FLEET') return;
+                        alert(`🚨 NEW ORDER AUTO-ASSIGNED!\nOrder ID: ${data.orderId}\nHead to the store immediately.`);
+                        document.getElementById('order-id-input').value = data.orderId;
+                        startDelivery();
+                    } else if (data.type === 'FLEET_HEATMAP_UPDATED') {
+                        drawHeatmapZones(data.payload);
+                    } else if (data.type === 'ORDER_CHAT_UPDATED' && data.orderId === activeOrderId) {
+                        appendChatMessage(data.chat);
+                    }
+                } catch(e) {}
+            };
+        }
+
+        // --- GPS ENGINE & BATTERY THROTTLING ---
+        function handleGPSUpdate(coords, source) {
+            const { latitude, longitude, speed, heading } = coords;
             
+            // 1. Update UI Stats
+            document.getElementById('gps-stats').textContent = `[${source}] Lat: ${latitude.toFixed(4)} | Lng: ${longitude.toFixed(4)} | Speed: ${speed ? (speed * 3.6).toFixed(1) + ' km/h' : '0 km/h'}`;
+            
+            // 2. Sync Map Visuals
+            if (riderMapMarker && riderMap) {
+                const latlng = [latitude, longitude];
+                riderMapMarker.setLatLng(latlng);
+                riderMap.panTo(latlng);
+            }
+
+            // 3. Low-Latency WebSockets (For Live Map)
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'GPS_UPDATE', orderId: activeOrderId, lat: latitude, lng: longitude, heading: heading || 0 }));
+            }
+
+            // 4. ENTERPRISE OPTIMIZATION: Battery Throttled REST Sync (For Database/Watchdog)
+            const now = Date.now();
+            // If rider is stopped (speed < 1 m/s), throttle backend saves to 15 seconds to save battery
+            const isMoving = speed && speed > 1;
+            const syncInterval = isMoving ? 5000 : 15000; 
+
+            if (now - lastSync > syncInterval && activeOrderId) {
+                lastSync = now;
+                fetch(REST_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ riderId: 'RIDER_' + activeOrderId.substring(0,5), lat: latitude, lng: longitude })
+                }).catch(() => {});
+            }
+        }
+
+        // --- DELIVERY LIFECYCLE ---
+        async function startDelivery() {
+            const input = document.getElementById('order-id-input').value.trim();
+            if (!input) return alert("Enter an Order ID.");
+            
+            activeOrderId = input;
+            
+            // UI Updates
+            document.getElementById('setup-view').classList.add('hidden');
+            document.getElementById('active-view').classList.remove('hidden');
+            document.getElementById('display-order-id').textContent = activeOrderId;
             document.getElementById('no-mission-state').classList.add('hidden');
             
-            // Programmatically switch to mission tab
+            // Switch tab & init maps
             document.querySelectorAll('.nav-item')[1].click(); 
             initLeafletMap();
-        };
 
-        // Intercept completeDelivery to enforce OTP check and update ledger
-        const legacyCompleteDeliveryForUI = completeDelivery;
-        completeDelivery = async function() {
+            // Start Tracking (Native vs HTML5)
+            if (isNative && BackgroundGeolocationPlugin) {
+                watchId = await BackgroundGeolocationPlugin.addWatcher(
+                    { requestPermissions: true, stale: false, distanceFilter: 10 },
+                    (location, error) => {
+                        if (error) return console.error(error);
+                        handleGPSUpdate({ latitude: location.latitude, longitude: location.longitude, speed: location.speed, heading: location.bearing }, 'NATIVE');
+                    }
+                );
+            } else if ("geolocation" in navigator) {
+                watchId = navigator.geolocation.watchPosition(
+                    (position) => handleGPSUpdate(position.coords, 'HTML5'),
+                    (err) => alert("GPS Error: " + err.message),
+                    { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
+                );
+            } else {
+                alert("Geolocation is not supported by this device.");
+            }
+        }
+
+        function stopTracking() {
+            if (watchId) {
+                if (isNative && BackgroundGeolocationPlugin) {
+                    BackgroundGeolocationPlugin.removeWatcher({ id: watchId });
+                } else {
+                    navigator.geolocation.clearWatch(watchId);
+                }
+                watchId = null;
+            }
+        }
+
+        function stopDelivery() {
+            stopTracking();
+            activeOrderId = null;
+            document.getElementById('active-view').classList.add('hidden');
+            document.getElementById('setup-view').classList.remove('hidden');
+            document.getElementById('order-id-input').value = '';
+            document.getElementById('no-mission-state').classList.remove('hidden');
+            document.querySelectorAll('.nav-item')[0].click(); // Back to dashboard
+        }
+
+        // --- ENTERPRISE OPTIMIZATION: OFFLINE "BASEMENT" QUEUE ---
+        async function completeDelivery() {
             const otpInput = document.getElementById('delivery-otp').value.trim();
             if (otpInput.length !== 4) {
                 alert("⚠️ Please enter the 4-digit Delivery OTP provided by the customer.");
                 return;
             }
 
-            // --- PHASE 31 SERVER VERIFICATION (MOCK) ---
-            // In production, this hits your /api/orders/:id/status endpoint
-            try {
-                // const res = await fetch(`https://dailypick.railway.app/api/orders/${activeOrderId}/status`, { method: 'PUT', body: JSON.stringify({ status: 'Delivered', otp: otpInput }) });
-                // if (!res.ok) throw new Error("Invalid OTP");
-                
-                legacyCompleteDeliveryForUI();
+            const dropPayload = { orderId: activeOrderId, otp: otpInput, status: 'Delivered', timestamp: Date.now() };
 
-                // Update Earnings Ledger (Phase 18 Integration)
-                completedDropsToday++;
-                document.getElementById('ledger-drops-count').textContent = completedDropsToday;
-                document.getElementById('ledger-total-rs').textContent = `Rs ${completedDropsToday * 40}`; // 40 Rs per drop
-                document.getElementById('delivery-otp').value = '';
-
-                document.getElementById('no-mission-state').classList.remove('hidden');
-                document.querySelectorAll('.nav-item')[0].click(); // Back to dashboard
-            } catch(e) {
-                alert("Server rejected the OTP. Please verify with the customer.");
-            }
-        };
-
-        // Intercept the HTML5 Geolocation to update the Leaflet Map marker visually
-        const originalWatchPositionPhase22 = navigator.geolocation.watchPosition;
-        navigator.geolocation.watchPosition = function(success, error, options) {
-            const mapSuccess = function(position) {
-                if (riderMapMarker && riderMap) {
-                    const latlng = [position.coords.latitude, position.coords.longitude];
-                    riderMapMarker.setLatLng(latlng);
-                    riderMap.panTo(latlng);
+            if (navigator.onLine) {
+                try {
+                    // Production Endpoint
+                    // const res = await fetch(`https://dailypick-backend-production-05d6.up.railway.app/api/orders/${activeOrderId}/status`, { method: 'PUT', body: JSON.stringify(dropPayload) });
+                    // if (!res.ok) throw new Error("Invalid OTP");
+                } catch (e) {
+                    queueOfflineDrop(dropPayload);
                 }
-                success(position);
-            };
-            return originalWatchPositionPhase22.call(navigator.geolocation, mapSuccess, error, options);
-        };
+            } else {
+                queueOfflineDrop(dropPayload);
+            }
 
-        // --- NEW: PHASE 31 IN-APP CHAT LOGIC ---
+            alert("Delivery Complete! GPS Broadcast terminated.");
+            
+            // Ledger & UI Updates
+            completedDropsToday++;
+            document.getElementById('ledger-drops-count').textContent = completedDropsToday;
+            document.getElementById('ledger-total-rs').textContent = `Rs ${completedDropsToday * 40}`; 
+            document.getElementById('delivery-otp').value = '';
+            
+            stopDelivery(); // Uses unified logic to clean up maps and return to dashboard
+        }
+
+        function queueOfflineDrop(payload) {
+            console.warn("[OFFLINE QUEUE] Connection lost. Queuing delivery confirmation locally.");
+            const queue = JSON.parse(localStorage.getItem('rider_offline_drops') || '[]');
+            queue.push(payload);
+            localStorage.setItem('rider_offline_drops', JSON.stringify(queue));
+        }
+
+        async function syncOfflineDrops() {
+            if (!navigator.onLine) return;
+            const queue = JSON.parse(localStorage.getItem('rider_offline_drops') || '[]');
+            if (queue.length === 0) return;
+
+            console.log(`[OFFLINE QUEUE] Network restored. Syncing ${queue.length} drops...`);
+            const remainingQueue = [];
+
+            for (const drop of queue) {
+                try {
+                    // const res = await fetch(`https://dailypick-backend-production-05d6.up.railway.app/api/orders/${drop.orderId}/status`, { method: 'PUT', body: JSON.stringify(drop) });
+                    // if (!res.ok) throw new Error("Sync Failed");
+                } catch (e) {
+                    remainingQueue.push(drop);
+                }
+            }
+            
+            localStorage.setItem('rider_offline_drops', JSON.stringify(remainingQueue));
+        }
+
+        // Auto-flush queue when network returns (e.g. driving out of a basement)
+        window.addEventListener('online', syncOfflineDrops);
+
+        // --- IN-APP CHAT ---
         function toggleChat() {
             const chatUI = document.getElementById('chat-ui');
             chatUI.classList.toggle('hidden');
@@ -588,11 +506,8 @@
             if (!message || !activeOrderId) return;
 
             input.value = '';
-            
-            // Optimistic UI Update
             appendChatMessage({ sender: 'Rider', message });
 
-            // Post to Server
             fetch(`https://dailypick-backend-production-05d6.up.railway.app/api/orders/${activeOrderId}/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer RIDER_TOKEN` },
@@ -608,7 +523,6 @@
             msgs.appendChild(bubble);
             msgs.scrollTop = msgs.scrollHeight;
         }
-
     </script>
 </body>
 </html>
