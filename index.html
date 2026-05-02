@@ -1,3 +1,4 @@
+<!-- dailypick-rider/index.html -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -435,13 +436,27 @@
                 return;
             }
 
-            const dropPayload = { orderId: activeOrderId, otp: otpInput, status: 'Delivered', timestamp: Date.now() };
+            // ENTERPRISE OPTIMIZATION: Assign an Idempotency key to safely handle network retries
+            const dropPayload = { 
+                orderId: activeOrderId, 
+                otp: otpInput, 
+                status: 'Delivered', 
+                timestamp: Date.now(),
+                idempotencyKey: 'RIDER-DROP-' + Date.now() + '-' + Math.random().toString(36).substring(2,8)
+            };
 
             if (navigator.onLine) {
                 try {
-                    // Production Endpoint
-                    // const res = await fetch(`https://dailypick-backend-production-05d6.up.railway.app/api/orders/${activeOrderId}/status`, { method: 'PUT', body: JSON.stringify(dropPayload) });
-                    // if (!res.ok) throw new Error("Invalid OTP");
+                    // ENTERPRISE OPTIMIZATION: Activated strict endpoint push
+                    const res = await fetch(`https://dailypick-backend-production-05d6.up.railway.app/api/orders/${activeOrderId}/status`, { 
+                        method: 'PUT',
+                        headers: { 
+                            'Content-Type': 'application/json',
+                            'Idempotency-Key': dropPayload.idempotencyKey
+                        },
+                        body: JSON.stringify(dropPayload) 
+                    });
+                    if (!res.ok) throw new Error("Invalid OTP or Sync Failed");
                 } catch (e) {
                     queueOfflineDrop(dropPayload);
                 }
@@ -477,8 +492,16 @@
 
             for (const drop of queue) {
                 try {
-                    // const res = await fetch(`https://dailypick-backend-production-05d6.up.railway.app/api/orders/${drop.orderId}/status`, { method: 'PUT', body: JSON.stringify(drop) });
-                    // if (!res.ok) throw new Error("Sync Failed");
+                    // ENTERPRISE OPTIMIZATION: Activated strict offline sync with Idempotency Key
+                    const res = await fetch(`https://dailypick-backend-production-05d6.up.railway.app/api/orders/${drop.orderId}/status`, { 
+                        method: 'PUT',
+                        headers: { 
+                            'Content-Type': 'application/json',
+                            'Idempotency-Key': drop.idempotencyKey 
+                        },
+                        body: JSON.stringify(drop) 
+                    });
+                    if (!res.ok) throw new Error("Sync Failed");
                 } catch (e) {
                     remainingQueue.push(drop);
                 }
