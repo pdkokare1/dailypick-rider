@@ -342,7 +342,7 @@
             // 1. Update UI Stats
             document.getElementById('gps-stats').textContent = `[${source}] Lat: ${latitude.toFixed(4)} | Lng: ${longitude.toFixed(4)} | Speed: ${speed ? (speed * 3.6).toFixed(1) + ' km/h' : '0 km/h'}`;
             
-            // 2. Sync Map Visuals
+            // 2. Sync Map Visuals (Throttled by RequestAnimationFrame internally by Leaflet)
             if (riderMapMarker && riderMap) {
                 const latlng = [latitude, longitude];
                 riderMapMarker.setLatLng(latlng);
@@ -362,11 +362,19 @@
 
             if (now - lastSync > syncInterval && activeOrderId) {
                 lastSync = now;
+                
+                // ENTERPRISE FIX: AbortController prevents hanging fetch sockets on spotty 2G/3G
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 3000); // 3s timeout
+                
                 fetch(REST_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ riderId: 'RIDER_' + activeOrderId.substring(0,5), lat: latitude, lng: longitude })
-                }).catch(() => {});
+                    body: JSON.stringify({ riderId: 'RIDER_' + activeOrderId.substring(0,5), lat: latitude, lng: longitude }),
+                    signal: controller.signal
+                })
+                .finally(() => clearTimeout(timeoutId))
+                .catch(() => {});
             }
         }
 
@@ -397,10 +405,11 @@
                     }
                 );
             } else if ("geolocation" in navigator) {
+                // ENTERPRISE FIX: Allow GPS chip to sleep via maximumAge (10s) to severely reduce battery drain
                 watchId = navigator.geolocation.watchPosition(
                     (position) => handleGPSUpdate(position.coords, 'HTML5'),
                     (err) => alert("GPS Error: " + err.message),
-                    { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
+                    { enableHighAccuracy: true, maximumAge: 10000, timeout: 5000 }
                 );
             } else {
                 alert("Geolocation is not supported by this device.");
@@ -491,6 +500,11 @@
             const remainingQueue = [];
 
             for (const drop of queue) {
+                // ENTERPRISE FIX: Break the loop securely if network dies mid-sync
+                if (!navigator.onLine) {
+                    remainingQueue.push(drop);
+                    continue; 
+                }
                 try {
                     // ENTERPRISE OPTIMIZATION: Activated strict offline sync with Idempotency Key
                     const res = await fetch(`https://dailypick-backend-production-05d6.up.railway.app/api/orders/${drop.orderId}/status`, { 
